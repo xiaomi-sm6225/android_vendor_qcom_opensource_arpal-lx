@@ -6770,7 +6770,7 @@ int ResourceManager::findActiveStreamsNotInDisconnectList(
      * It's the same device from which streams in 'disconnectingStreams' are
      * disconnecting.
      */
-    dAttr.id = (pal_device_id_t)std::get<1>(streamDevDisconnectList[0]);
+    dAttr.id = PAL_DEVICE_OUT_SPEAKER;
     devObj = Device::getInstance(&dAttr, rm);
     if (devObj == nullptr) {
         PAL_DBG(LOG_TAG, "Error getting device ( %s ) instance",
@@ -6842,6 +6842,14 @@ int ResourceManager::restoreDeviceConfigForUPD(
         return ret;
     }
 
+    for (auto it = StreamDevConnect.begin(); it != StreamDevConnect.end(); it++) {
+        if (((std::get<1>(*it))->id != PAL_DEVICE_OUT_HANDSET) &&
+            (listAllBackEndIds[(std::get<1>(*it))->id].second ==
+             listAllBackEndIds[PAL_DEVICE_OUT_HANDSET].second)) {
+            PAL_DBG(LOG_TAG, "handset BE occupied by dev: %d", (std::get<1>(*it))->id);
+            return ret;
+        }
+    }
     /*
      * The streams that are skipping the switch to the new device are obtained
      * using the findActiveStreamsNotInDisconnectList method if not obtained via
@@ -7157,6 +7165,7 @@ bool ResourceManager::updateDeviceConfig(std::shared_ptr<Device> *inDev,
     std::vector <Stream *> streamsToSwitch;
     std::vector <Stream*>::iterator sIter;
     struct pal_device streamDevAttr;
+    struct pal_device spkr_devAttr;
     struct pal_device *temp_devAttr = nullptr;
     int stream_idx = 0;
 
@@ -7214,6 +7223,34 @@ bool ResourceManager::updateDeviceConfig(std::shared_ptr<Device> *inDev,
      * if yes add them to streams to device switch
      */
     getSharedBEActiveStreamDevs(sharedBEStreamDev, inDevAttr->id);
+
+    /*
+     * Special case for UPD concurrency, UPD only supports handset or speaker.
+     * If HANDSET device shares backend with headphone, then when headphone
+     * is coming, UPD needs to switch to speaker temporarily.
+     */
+    if (sharedBEStreamDev.size() > 0 && inDevAttr->id != PAL_DEVICE_OUT_SPEAKER) {
+        std::vector <std::tuple<Stream *, uint32_t>>::iterator iter;
+        for (iter = sharedBEStreamDev.begin(); iter != sharedBEStreamDev.end(); iter++) {
+            struct pal_stream_attributes sAttr;
+            Stream *sharedStream = std::get<0>(*iter);
+            sharedStream->getStreamAttributes(&sAttr);
+            if (!isValidDeviceSwitchForStream(std::get<0>(*iter), inDevAttr->id)) {
+                spkr_devAttr.id = PAL_DEVICE_OUT_SPEAKER;
+                status = rm->getDeviceConfig(&spkr_devAttr, &sAttr);
+                if (status) {
+                    PAL_ERR(LOG_TAG, "Error getting deviceConfig");
+                    mActiveStreamMutex.lock();
+                    goto error;
+                }
+                streamDevDisconnect.push_back(*iter);
+                streamDevConnect.push_back({std::get<0>(*iter), &spkr_devAttr});
+                sharedBEStreamDev.erase(iter);
+                break;
+            }
+        }
+    }
+
     if (sharedBEStreamDev.size() > 0) {
         for (const auto &elem : sharedBEStreamDev) {
              struct pal_stream_attributes strAttr;
@@ -11366,6 +11403,7 @@ void ResourceManager::restoreDevice(std::shared_ptr<Device> dev)
     std::vector <std::tuple<Stream *, uint32_t>> sharedBEStreamDev;
     struct pal_device newDevAttr;
     struct pal_device curDevAttr;
+    struct pal_device handsetDevAttr;
     uint32_t count = 0;
     struct pal_stream_attributes sAttr;
     pal_stream_type_t type;
@@ -11392,7 +11430,8 @@ void ResourceManager::restoreDevice(std::shared_ptr<Device> dev)
         goto exit;
     }
 
-    if (isPluginPlaybackDevice((pal_device_id_t)dev->getSndDeviceId())) {
+    if (isPluginPlaybackDevice((pal_device_id_t)dev->getSndDeviceId()) &&
+        (dev->getDeviceCount() != 0)) {
         PAL_ERR(LOG_TAG, "don't restore device for usb/3.5 hs playback");
         goto exit;
     }
@@ -11414,11 +11453,32 @@ void ResourceManager::restoreDevice(std::shared_ptr<Device> dev)
     mActiveStreamMutex.lock();
     // check if need to update active group devcie config when usecase goes aways
     // if stream device is with same virtual backend, it can be handled in shared backend case
+    // also check if needs to switch UPD back to handset from speaker if the device stopped
+    // shares BE with handset, e.g. when there's no active usecase on headphone, since UPD
+    // was temporarily switched to speaker, now needs to switch UPD back to handset.
     if (dev->getDeviceCount() == 0) {
         status = checkAndUpdateGroupDevConfig(&curDevAttr, &sAttr, streamsToSwitch, &newDevAttr, false);
         if (status) {
             PAL_ERR(LOG_TAG, "no valid group device config found");
             streamsToSwitch.clear();
+        }
+        if (curDeviceId != PAL_DEVICE_OUT_SPEAKER &&
+            curDeviceId != PAL_DEVICE_OUT_HANDSET) {
+            pal_stream_type_t type;
+            for (auto str: rm->mActiveStreams) {
+                str->getStreamType(&type);
+                if (type == PAL_STREAM_ULTRASOUND) {
+                    if (listAllBackEndIds[curDeviceId].second ==
+                        listAllBackEndIds[PAL_DEVICE_OUT_HANDSET].second) {
+                        handsetDevAttr.id = PAL_DEVICE_OUT_HANDSET;
+                        str->getStreamAttributes(&sAttr);
+                        getDeviceConfig(&handsetDevAttr, &sAttr);
+                        streamDevDisconnect.push_back({str,PAL_DEVICE_OUT_SPEAKER});
+                        streamDevConnect.push_back({str,&handsetDevAttr});
+                    }
+                    break;
+                }
+            }
         }
     }
 

@@ -1314,6 +1314,7 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
     struct pal_volume_data *volume = NULL;
     pal_device_id_t newBtDevId;
     bool isBtReady = false;
+    struct pal_device spkr_devAttr;
 
     rm->lockActiveStream();
     mStreamMutex.lock();
@@ -1516,6 +1517,55 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
            PAL_DBG(LOG_TAG, "isComboHeadsetActive false");
            strAttr.isComboHeadsetActive = false;
         }
+
+        /*
+         * Special case for UPD concurrency, UPD only supports handset or speaker.
+         * If HANDSET device shares backend with headphone, then when headphone
+         * is coming, UPD needs to switch to speaker temporarily.
+         * If UPD is already temporarily on speaker and the incoming device is speaker,
+         * skip the handling below and UPD needs to switch back to handset instead.
+         */
+        if (sharedBEStreamDev.size() > 0 && newDeviceId != PAL_DEVICE_OUT_SPEAKER) {
+            std::vector <std::tuple<Stream *, uint32_t>>::iterator iter;
+            for (iter = sharedBEStreamDev.begin(); iter != sharedBEStreamDev.end(); iter++) {
+                struct pal_stream_attributes sAttr;
+                std::vector<Stream*> activeStreams;
+                Stream *sharedStream = std::get<0>(*iter);
+                sharedStream->getStreamAttributes(&sAttr);
+                if (!rm->isValidDeviceSwitchForStream(std::get<0>(*iter), newDeviceId)) {
+                    spkr_devAttr.id = PAL_DEVICE_OUT_SPEAKER;
+                    std::shared_ptr<Device> spkObj = Device::getInstance(&spkr_devAttr, rm);
+                    status = rm->getDeviceConfig(&spkr_devAttr, &sAttr);
+                    if (status) {
+                        PAL_ERR(LOG_TAG, "Error getting deviceConfig");
+                        mStreamMutex.unlock();
+                        rm->unlockActiveStream();
+                        return status;
+                    }
+                    streamDevDisconnect.push_back(*iter);
+                    StreamDevConnect.push_back({std::get<0>(*iter), &spkr_devAttr});
+                    sharedBEStreamDev.erase(iter);
+                    // If new devices contains speaker device, reroute current streams
+                    // which are on speaker by updating to UPD speaker dev attr
+                    rm->getActiveStream_l(activeStreams, spkObj);
+                    if (!activeStreams.size())
+                        break;
+                    for (int j = 0; j < connectCount; j++) {
+                        if (newDevices[newDeviceSlots[j]].id == PAL_DEVICE_OUT_SPEAKER) {
+                            for (auto it = activeStreams.begin(); it != activeStreams.end(); it++) {
+                                streamDevDisconnect.push_back({(*it), PAL_DEVICE_OUT_SPEAKER});
+                                StreamDevConnect.push_back({(*it), &spkr_devAttr});
+                            }
+                            ar_mem_cpy(&newDevices[newDeviceSlots[j]], sizeof(struct pal_device),
+                                       &spkr_devAttr, sizeof(struct pal_device));
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
         /* This can result in below situation:
          * 1) No matching SharedBEStreamDev (handled in else part).
          *    e.g. - case 1a, 2.
