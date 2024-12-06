@@ -82,6 +82,7 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
             ((val) * ((max) - (min)) * 0.01 + (min) + .5)
 
 #define NUM_OF_CAL_KEYS 3
+#define POP_SUPPRESSOR_RAMP_DELAY (1*1000)
 
 SessionAlsaVoice::SessionAlsaVoice(std::shared_ptr<ResourceManager> Rm)
 {
@@ -1010,6 +1011,10 @@ int SessionAlsaVoice::stop(Stream * s)
             }
         }
     }
+    /*config mute on pop suppressor*/
+    setPopSuppressorMute(s);
+    usleep(POP_SUPPRESSOR_RAMP_DELAY);
+
     if (pcmRx) {
         status = pcm_stop(pcmRx);
         if (status) {
@@ -1826,6 +1831,7 @@ int SessionAlsaVoice::disconnectSessionDevice(Stream *streamHandle,
     if (rxAifBackEnds.size() > 0) {
         /*config mute on pop suppressor*/
         setPopSuppressorMute(streamHandle);
+        usleep(POP_SUPPRESSOR_RAMP_DELAY);
 
         status =  SessionAlsaUtils::disconnectSessionDevice(streamHandle,
                                                             streamType, rm,
