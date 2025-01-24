@@ -35,6 +35,7 @@
 #include "PalAudioRoute.h"
 #include "ResourceManager.h"
 #include "SessionAlsaUtils.h"
+#include "kvh2xml.h"
 #include <agm/agm_api.h>
 
 #include<fstream>
